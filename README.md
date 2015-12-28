@@ -5,7 +5,11 @@ This python script is exporting photos from Apple Photos.app and places copies i
 
 Requires Python3, py-applescript and PyObjC of a new version.
 
-Python3 can for example be installed via HomeBrew.
+Python3 can for example be installed via HomeBrew:
+
+```
+# brew install python3
+```
 
 After that, install py-applescript and PyObjC as follows:
 
