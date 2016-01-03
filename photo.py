@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Version 0.0.03
+# Version 0.0.04
 
 # Copyright (c) 2015 Patrik Fältström <paf@frobbit.se>
 #
@@ -157,8 +157,9 @@ def connectToPhotoDb():
 def checkWhatFilesExists():
     global theFiles
     theNum = 0
+    theLen = len(photopath)
     for root, dirs, files in os.walk(photopath):
-        r = root[len(photopath):]
+        r = root[theLen:]
         if(not r in theFolders):
             theFolders[r] = False
         for f in files:
@@ -236,8 +237,9 @@ def maybeExport(p,uuid):
     # Find one already exported version of the photo
     linkSource = None
     match = "/%s" % theFilename
+    theLen = len(match)
     for k in theFiles.keys():
-        if(k[-len(match):] == match):
+        if(k[-theLen:] == match):
             linkSource = k
             break
     if(not linkSource):
@@ -299,11 +301,12 @@ def checkPhotos():
     photoc.execute('UPDATE photos SET shouldexist = 0')
     photoconn.commit()
     # Loop over all photos, one uuid at a time
+    theLen = len(p)
     for uuid in p:
         photoc.execute('UPDATE photos SET shouldexist = 1 WHERE uuid = ?', (uuid,))
-        photoconn.commit()
+        #photoconn.commit()
         if(not verbose):
-            progress = i / len(p)
+            progress = i / theLen
             sys.stdout.write('\rPhotos: [ %-30s ] %3d%%' % (format('#' * int(progress * 30)), int(progress * 100)))
             sys.stdout.flush()
         # Check export status etc
@@ -312,6 +315,7 @@ def checkPhotos():
             print("\nSomething is seriously wrong with %s %s" % (p[uuid]['filename'], uuid))
             sys.exit(1)
         i = i + 1
+    photoconn.commit()
     if(not verbose):
         sys.stdout.write('\rPhotos: [ %-30s ] %d%%\n' % (format('#' * 30), 100))
     # Remove stuff that is not referenced
@@ -319,10 +323,10 @@ def checkPhotos():
     photoc.execute('SELECT filename FROM photos WHERE shouldexist = 0')
     row = photoc.fetchone()
     while(row):
-        linkSource = None
-        match = "/%s" % theFilename
+        match = "/%s" % row[0]
+        theLen = len(match)
         for k in theFiles.keys():
-            if(k[-len(match):] == match):
+            if(k[-theLen:] == match):
                 # Tag files so that they later will be removed
                 theFiles[k] = False
     # Remove the info about missing UUIDs
