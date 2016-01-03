@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Version 0.0.01
+# Version 0.0.03
 
 # Copyright (c) 2015 Patrik Fältström <paf@frobbit.se>
 #
@@ -49,6 +49,7 @@ from os import listdir
 from os.path import isfile, join
 
 def usage():
+    print("photo.py version 0.0.02")
     print("Arguments:")
     print(" -h --help           Gives help text")
     print(" -v --verbose        Verbose output")
@@ -63,6 +64,10 @@ p = {}
 
 # Dict with information about all persons/photos
 pf = {}
+
+# Dicts with information about all files and folders on disk
+theFiles = {}
+theFolders = {}
 
 # Root of where data is stored -- default is CWD
 rootPath = ""
@@ -146,30 +151,27 @@ def connectToPhotoDb():
                                            uuid text,
                                            filename text,
                                            shouldexist integer)''')
-    photoc.execute('''CREATE TABLE file (id integer primary key autoincrement,
-                                           filename text,
-                                           directory text,
-                                           shouldexist integer,
-                                           doexist integer)''')
-    photoc.execute('CREATE INDEX file_filename_directory on file (filename, directory)')
+    photoc.execute('CREATE INDEX photos_uuid on photos (uuid)')
     photoconn.commit()
 
 def checkWhatFilesExists():
-    global photoconn
-    global photoc
-    photoc.execute('update file set doexist = 0')
-    photoconn.commit()
+    global theFiles
+    theNum = 0
     for root, dirs, files in os.walk(photopath):
         r = root[len(photopath):]
+        if(not r in theFolders):
+            theFolders[r] = False
         for f in files:
+            if(not verbose):
+                theNum = theNum + 1
+                sys.stdout.write('\rFiles: %d' % (theNum))
+                sys.stdout.flush()
             doLog('Found file %s in directory %s' % (f, r))
-            photoc.execute("SELECT count(*) FROM file WHERE filename = ? AND directory = ?", (f, r))
-            number = photoc.fetchone()[0]
-            if(number == 0):
-                photoc.execute('INSERT INTO file VALUES (NULL, ?, ?, 0, 1)', (f, r))
-            else:
-                photoc.execute('UPDATE file SET doexist = 1 WHERE filename = ? AND directory = ?', (f, r))
-    photoconn.commit()
+            thePath = "%s/%s" % (r, f)
+            theFiles[thePath] = False
+    if(not verbose):
+        sys.stdout.write(" Done!\n")
+        sys.stdout.flush()
 
 def maybeExport(p,uuid):
     global photoconn
@@ -189,6 +191,7 @@ def maybeExport(p,uuid):
         photoc.execute('UPDATE photos SET filename = ? WHERE uuid = ?', (theFilename, uuid))
         photoconn.commit()
         # Export the file from Photos.app
+        doLog("Trying to export %s" % (p[uuid]['filename']))
         thefiles = []
         while(len(thefiles) == 0):
             while(True):
@@ -205,9 +208,17 @@ def maybeExport(p,uuid):
                     scptLaunch.run()
             # Check what filename it got (only one file in the directory)
             thefiles = [f for f in listdir(tmppath) if isfile(join(tmppath, f))]
-            doLog("len(thefiles)=%d" % len(thefiles))
+            if(len(thefiles) > 1):
+                doLog("There should be max one file in tmp, not %d" % len(thefiles))
+                removeDirectory(tmppath)
+                ensureDirectoryExists(tmppath)
+                cleanup(p, uuid)
+                return(False)
         thefile = thefiles[0]
         doLog("Exported photo with uuid %s to %s" % (uuid, thefile))
+        if(thefile[-3:] != "JPG" and thefile[-3:] != "jpg"):
+            print("The file extension is not JPG when exporting uuid %s to %s!" % (uuid, thefile))
+            sys.exit(0)
         # Fetch first directory it should be stored in
         theTargetDirectory = p[uuid]['albums'][0]
         targetDir = "%s%s/" % (photopath, theTargetDirectory)
@@ -218,52 +229,60 @@ def maybeExport(p,uuid):
         doLog("Stored as %s" % (targetPath))
         os.rename(sourcePath, targetPath)
         # Save info about the stored file
-        photoc.execute('INSERT INTO file VALUES (NULL, ?, ?, 1, 1)', (theFilename,theTargetDirectory))
-        photoconn.commit()
+        theFiles["%s/%s" % (theTargetDirectory, theFilename)] = True
     # The file exist, at least in one location, fetch the filename (same in all directories)
     photoc.execute("SELECT filename FROM photos WHERE uuid = ?", (uuid,))
     theFilename = photoc.fetchone()[0]
     # Find one already exported version of the photo
-    photoc.execute('SELECT directory FROM file WHERE filename = ? limit 1', (theFilename,))
-    theTargetDirectory = "%s" % photoc.fetchone()[0]
-    linkSource = "%s%s/%s" % (photopath, theTargetDirectory, theFilename)
-    # Check whether the linkSource exists, and if not, remove from file and photos structures, and rerun
-    if(not os.path.isfile(linkSource)):
+    linkSource = None
+    match = "/%s" % theFilename
+    for k in theFiles.keys():
+        if(k[-len(match):] == match):
+            linkSource = k
+            break
+    if(not linkSource):
+        doLog("Failed to find directory from file where filename = %s (UUID = %s)" % (theFilename, uuid))
         # Clean up database, file system will be cleaned up on next run
         photoc.execute("DELETE FROM photos WHERE uuid = ?", (uuid,))
         photoc.execute("DELETE from photos WHERE filename = ?", (theFilename,))
-        photoc.execute("DELETE from file WHERE filename = ?", (theFilename,))
         photoconn.commit()
-        print("\nInconcistencies found [type 1], please rerun the program!")
-        sys.exit(0)
+        doLog("Inconcistencies found [type 1 (%s, %s)]!" % (theFilename, uuid))
+        return(False)
+    linkSource = "%s%s" % (photopath, linkSource)
     # Loop over all directories (albums) the photo should exist in, and create hard links
     for theTargetDirectory in p[uuid]['albums']:
-        # Check whether there is a record in the file table for this filename and directory
-        photoc.execute('SELECT count(*) FROM file WHERE filename = ? AND directory = ?', (theFilename, theTargetDirectory))
-        number = photoc.fetchone()[0]
-        if(number > 0):
-            # If there is a record, check that the file also exists in the file system
-            if(not os.path.isfile("%s%s/%s" % (photopath, theTargetDirectory, theFilename))):
-                # Clean up database, file system will be cleaned up on next run
-                photoc.execute("DELETE FROM photos WHERE uuid = ?", (uuid,))
-                photoc.execute("DELETE from photos WHERE filename = ?", (theFilename,))
-                photoc.execute("DELETE from file WHERE filename = ?", (theFilename,))
-                photoconn.commit()
-                print("\nInconcistencies found [type 2], please rerun the program!!")
-                sys.exit(0)
-        if(number == 0):
-            # If there is no such record, insert one
-            photoc.execute('INSERT INTO file VALUES (NULL, ?, ?, 1, 1)', (theFilename,theTargetDirectory))
-            photoconn.commit()
+        # Check whether file exists
+        if(not "%s/%s" % (theTargetDirectory, theFilename) in theFiles):
             # Create a hard link to already existing exported photo
             os.makedirs("%s%s" % (photopath, theTargetDirectory), exist_ok=True)
             linkTarget = "%s%s/%s" % (photopath, theTargetDirectory, theFilename)
-            doLog("Linked %s" % linkTarget)
-            os.link(linkSource, linkTarget)
-        # Update the file table with information that the file should exist and do exist
-        photoc.execute('UPDATE file SET shouldexist = 1, doexist = 1 WHERE filename = ? AND directory = ?', (theFilename,theTargetDirectory))
-        photoconn.commit()
+            doLog("Linking %s" % linkTarget)
+            try:
+                os.link(linkSource, linkTarget)
+            except:
+                if(linkSource.lower() == linkTarget.lower()):
+                    if(not verbose):
+                        print("")
+                    print("Two albums exists with same name, which must be corrected manually!")
+                    print("%s" % linkSource)
+                    print("%s" % linkTarget)
+                    sys.exit(0)
+                doLog("Link %s -> %s failed" % (linkSource, linkTarget))
+                doLog("Unlink %s" % (linkTarget))
+                os.unlink(linkTarget)
+                doLog("Linking %s (2nd try)" % linkTarget)
+                os.link(linkSource, linkTarget)
+        # Update status of this path
+        theFiles["%s/%s" % (theTargetDirectory, theFilename)] = True
         doLog("Validated %s/%s" % (theTargetDirectory, theFilename))
+    return(True)
+
+def checkWhatFoldersShouldExist():
+    global theFolders
+    for f in theFolders:
+        if(len(f) > 0 and not theFolders[f]):
+            doLog("Removing %s" % (f))
+            removeDirectory("%s%s" % (photopath,f))
 
 def checkPhotos():
     global photoconn
@@ -275,6 +294,7 @@ def checkPhotos():
     if(photoc == None):
         connectToPhotoDb()
         checkWhatFilesExists()
+        checkWhatFoldersShouldExist()
     # Mark all photos as "not seen yet"
     photoc.execute('UPDATE photos SET shouldexist = 0')
     photoconn.commit()
@@ -284,46 +304,60 @@ def checkPhotos():
         photoconn.commit()
         if(not verbose):
             progress = i / len(p)
-            sys.stdout.write('\r[ %-30s ] %3d%%' % (format('#' * int(progress * 30)), int(progress * 100)))
+            sys.stdout.write('\rPhotos: [ %-30s ] %3d%%' % (format('#' * int(progress * 30)), int(progress * 100)))
+            sys.stdout.flush()
         # Check export status etc
-        maybeExport(p,uuid)
+        if(not maybeExport(p,uuid)):
+            maybeExport(p.uuid)
+            print("\nSomething is seriously wrong with %s %s" % (p[uuid]['filename'], uuid))
+            sys.exit(1)
         i = i + 1
     if(not verbose):
-        sys.stdout.write('\r[ %-30s ] %d%%\n' % (format('#' * 30), 100))
+        sys.stdout.write('\rPhotos: [ %-30s ] %d%%\n' % (format('#' * 30), 100))
     # Remove stuff that is not referenced
     # Start by checking photos table
     photoc.execute('SELECT filename FROM photos WHERE shouldexist = 0')
     row = photoc.fetchone()
     while(row):
-        # Tag files so that they later will be removed
-        photoc.execute('UPDATE file SET shouldexist = 0 WHERE filename = ?', (row[0],))
-        photoconn.commit()
+        linkSource = None
+        match = "/%s" % theFilename
+        for k in theFiles.keys():
+            if(k[-len(match):] == match):
+                # Tag files so that they later will be removed
+                theFiles[k] = False
     # Remove the info about missing UUIDs
     photoc.execute('DELETE FROM photos WHERE shouldexist = 0')
     photoconn.commit()
     # Now look at the file table for stuff that should not exist
-    photoc.execute('SELECT directory, filename FROM file WHERE doexist = 1 and shouldexist = 0')
-    row = photoc.fetchone()
-    while(row):
-        thePath = "%s%s/%s" % (photopath, row[0], row[1])
-        # Remove files that should not exist
-        os.unlink(thePath)
-        doLog("Removing %s" % (thePath))
-        row = photoc.fetchone()
-    # Finally, remove from the file table
-    photoc.execute('DELETE FROM file WHERE doexist = 1 and shouldexist = 0')
-    photoconn.commit()
+    for f in theFiles:
+        if(not theFiles[f]):
+            thePath = "%s%s" % (photopath, f)
+            # Remove files that should not exist
+            os.unlink(thePath)
+            doLog("Removing %s" % (thePath))
 
 def openLibrary(path,file):
-    doLog("Trying to open database %s/database/%s" % (path,file))
+    theFilename = "%s/Database/%s" % (path,file)
+    if(not os.path.exists(theFilename)):
+        theFilename = "%s/Database/apdb/%s" % (path,file)
+    doLog("Trying to open database %s" % (theFilename))
     try:
-        conn = sqlite3.connect("%s/database/%s" % (path,file))
+        conn = sqlite3.connect("%s" % (theFilename))
         c = conn.cursor()
     except sqlite3.Error as e:
-        print("An error occurred: %s %s/database/%s" % (e.args[0],path,file))
+        print("An error occurred: %s %s" % (e.args[0],theFilename))
         sys.exit(3)
     doLog("SQLite database is open")
     return(conn, c)
+
+def keepFolder(folder):
+    global theFolders
+    s = folder.find("/")
+    while(s > 0):
+        theFolders[folder[:s]] = True
+        s = s + 1
+        s = folder.find("/", s)
+    theFolders[folder] = True
 
 def doList(theFile):
     global p
@@ -334,24 +368,41 @@ def doList(theFile):
 
     # Look for all combinations of persons and pictures
     doLog("Grabbing information about persons")
-    (conn, c) = openLibrary(theFile,"apdb/Person.db")
+    (conn, c) = openLibrary(theFile,"Person.db")
     doLog("Have connection with database")
+    i = 0
+    c.execute("select count(*) from RKFace, RKPerson where RKFace.personID = RKperson.modelID")
+    theNum = c.fetchone()[0]
     c.execute("select RKPerson.name, RKFace.imageID from RKFace, RKPerson where RKFace.personID = RKperson.modelID")
     for person in c:
         if(not person[1] in pf):
             pf[person[1]] = []
         pf[person[1]].append(person[0])
         doLog("%s %s" % (person[1], person[0]))
+        if(not verbose):
+            progress = i / theNum
+            sys.stdout.write('\rFaces:  [ %-30s ] %3d%%' % (format('#' * int(progress * 30)), int(progress * 100)))
+            sys.stdout.flush()
+            i = i + 1
     conn.close()
+    sys.stdout.write(' Done!\n')
     doLog("Finished walking through persons")
 
     doLog("Grabbing information about photos")
-    (conn, c) = openLibrary(theFile,"apdb/Library.apdb")
+    (conn, c) = openLibrary(theFile,"Library.apdb")
     doLog("Have connection with database")
     d = conn.cursor()
     e = conn.cursor()
-    c.execute("select RKVersion.uuid, RKVersion.modelId, RKVersion.masterUuid, RKVersion.filename, RKVersion.lastmodifieddate, RKVersion.imageDate, RKVersion.mainRating, RKVersion.hasAdjustments, RKVersion.hasKeywords, RKVersion.imageTimeZoneOffsetSeconds, RKMaster.imagePath from RKVersion, RKMaster where RKVersion.isInTrash = 0 and RKVersion.type = 2 and RKVersion.masterUuid = RKMaster.uuid")
+    c.execute("select count(*) from RKVersion, RKMaster where RKVersion.isInTrash = 0 and RKVersion.type = 2 and RKVersion.masterUuid = RKMaster.uuid and RKVersion.filename not like '%.pdf'")
+    theNum = c.fetchone()[0]
+    c.execute("select RKVersion.uuid, RKVersion.modelId, RKVersion.masterUuid, RKVersion.filename, RKVersion.lastmodifieddate, RKVersion.imageDate, RKVersion.mainRating, RKVersion.hasAdjustments, RKVersion.hasKeywords, RKVersion.imageTimeZoneOffsetSeconds, RKMaster.imagePath from RKVersion, RKMaster where RKVersion.isInTrash = 0 and RKVersion.type = 2 and RKVersion.masterUuid = RKMaster.uuid and RKVersion.filename not like '%.pdf'")
+    i = 0
     for row in c:
+        if(not verbose):
+            progress = i / theNum
+            sys.stdout.write('\rPhotos: [ %-30s ] %3d%%' % (format('#' * int(progress * 30)), int(progress * 100)))
+            sys.stdout.flush()
+            i = i + 1
         uuid = row[0]
         p[uuid] = {}
         p[uuid]['modelID'] = row[1]
@@ -383,19 +434,23 @@ def doList(theFile):
                         doLog("folder: %s %s" % (folderrow[0], folderrow[1]))
                         foldername = "%s/%s" % (folderrow[0], foldername)
                         folderUUID = folderrow[1]
-                p[uuid]['albums'].append(foldername)
+                p[uuid]['albums'].append("Albums/%s" % foldername)
+                keepFolder("Albums/%s" % foldername)
 
         # Add folder name based on date of photo
         foldername = "Date/%s/%s" % (p[uuid]['imageDate'].strftime("%Y"), p[uuid]['imageDate'].strftime("%Y-%m"))
         p[uuid]['albums'].append(foldername)
+        keepFolder(foldername)
 
         # Add folder name based on persons
         if(uuid in pf):
             for personName in pf[uuid]:
                 p[uuid]['albums'].append("Persons/%s" % personName)
+                keepFolder("Persons/%s" % personName)
 
         doLog("To be stored in album(s) %s" % (p[uuid]['albums']))
     conn.close()
+    sys.stdout.write(' Done!\n')
 
 def query_yes_no(question, default="no"):
     """Ask a yes/no question via raw_input() and return their answer.
@@ -437,8 +492,8 @@ def removeDirectory(directory):
         for name in dirs:
             os.rmdir(os.path.join(root, name))
             doLog("Removing %s" % (os.path.join(root, name)))
-    os.rmdir(root)
-    doLog("Removing %s" % (root))
+    os.rmdir(directory)
+    doLog("Removing %s" % (directory))
 
 def reinitialize():
     global photodb
@@ -481,7 +536,7 @@ def main():
         usage()
         sys.exit(2)
     filename = ("%s/Pictures/Photos Library.photoslibrary" % os.path.expanduser("~"))
-    if(not os.path.exists("%s/database/apdb/Library.apdb" % filename)):
+    if(not os.path.exists("%s/database/apdb/Library.apdb" % filename) and not os.path.exists("%s/database/Library.apdb" % filename)):
         filename = None
     # Patch until we know what arguments to use
     doInit = False
@@ -490,13 +545,13 @@ def main():
             verbose = True
         elif o in ("-h", "--help"):
             usage()
-            sys.exit()
+            sys.exit(0)
         elif o in ("-r", "--root"):
             rootpath = a
         elif o in ("-f", "--file"):
             filename = a
-            if(not os.path.exists("%s/database/apdb/Library.apdb" % filename)):
-                print("Database %s/database/apdb/Library.apdb does not exist" % filename)
+            if(not os.path.exists("%s/database/apdb/Library.apdb" % filename) and not os.path.exists("%s/database/Library.apdb" % filename)):
+                print("Database %s/database/[apdb/]Library.apdb does not exist" % filename)
                 sys.exit(1)
         elif o in ("-i", "--init"):
             doInit = True
