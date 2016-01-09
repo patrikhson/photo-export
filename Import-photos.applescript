@@ -15,7 +15,7 @@ on checkName(theFile)
 	tell application "Finder"
 		set theName to name of theFile
 	end tell
-	if theName ends with ".jpg" or theName ends with ".png" or theName ends with ".cr2" or theName ends with ".jpeg" or theName ends with ".mov" or theName ends with ".mp4" then
+	if theName ends with ".jpg" or theName ends with ".png" or theName ends with ".cr2" or theName ends with ".CR2" or theName ends with ".jpeg" or theName ends with ".mov" or theName ends with ".mp4" then
 		return true
 	else
 		return false
@@ -67,14 +67,16 @@ repeat with j from 1 to number of items in albumNameList
 		end if
 	end repeat
 	-- Tell Photos to import the actual images
-	tell application "Photos"
-		try
-			set theAlbum to album theAlbumname
-		on error
-			set theAlbum to (make new album named theAlbumname)
-		end try
-		import imageList into theAlbum without skip check duplicates
-	end tell
+	with timeout of 6000 seconds
+		tell application "Photos"
+			try
+				set theAlbum to album theAlbumname
+			on error
+				set theAlbum to (make new album named theAlbumname)
+			end try
+			import imageList into theAlbum without skip check duplicates
+		end tell
+	end timeout
 end repeat
 
 -- Move all files to destination
