@@ -1,3 +1,6 @@
+-- Adds selected media items to folders named as YYYY-MM of the creation
+-- date of the item itself. It does not remove the item from the current
+-- album. That have to be done manually.
 
 tell application "Photos"
 	set selectedPictures to selection

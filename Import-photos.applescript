@@ -1,3 +1,12 @@
+-- Adds files in 1st selected folder to Photos, into album named YYYY-MM
+-- after the creation date of the media item itself. Will ask whether
+-- duplicates should be added or not. When finishing, it will move all files
+-- added (including the ones that was ignored because of being duplicates)
+-- to 2nd selected folder, so that only files are left in Finder that
+-- where not touched. I.e. can be rerun multiple times.
+
+
+
 -- Calculate name of the folder to store this image in
 on getAlbumName(theFile)
 	tell application "Finder"
