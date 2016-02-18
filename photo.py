@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Version 0.0.04
+# Version 0.0.05
 
 # Copyright (c) 2015 Patrik Fältström <paf@frobbit.se>
 #
@@ -49,13 +49,14 @@ from os import listdir
 from os.path import isfile, join
 
 def usage():
-    print("photo.py version 0.0.02")
+    print("photo.py version 0.0.04")
     print("Arguments:")
     print(" -h --help           Gives help text")
     print(" -v --verbose        Verbose output")
     print(" -f FILE --file=FILE Looks for data in FILE (otherwise look for normal Photo library location)")
     print(" -r DIR --root=DIR   Store data in directory named DIR (otherwise in current working directory")
     print(" -i --init           Reinitialize database and files on disk")
+    print(" SQLITEFILE          The sqlite database that holds data about the photo library")
 
 verbose = False
 
@@ -64,6 +65,9 @@ p = {}
 
 # Dict with information about all persons/photos
 pf = {}
+
+# Set to version of database
+theVersion = None
 
 # Dicts with information about all files and folders on disk
 theFiles = {}
@@ -86,6 +90,33 @@ scptExport = ""
 scptLaunch = ""
 scptQuit = ""
 
+# Handle progress bar (equivalent)
+statusText = ""
+maxValue = -1
+
+def initStatus(text, max):
+    global statusText
+    global maxValue
+
+    statusText = text
+    maxValue = max
+
+def setStatus(value):
+    if(not verbose):
+        if(maxValue > 0):
+            progress = value / maxValue
+            sys.stdout.write('\r%s: [ %-30s ] %3d%%' % (statusText, format('#' * int(progress * 30)), int(progress * 100)))
+        else:
+            sys.stdout.write('\r%s: %d' % (statusText, theNum))
+        sys.stdout.flush()
+
+def closeStatus():
+    maxValue = -1
+    statusText = ""
+    if(not verbose):
+        sys.stdout.write('\r%s: [ %-30s ] %d%%\n' % (statusText, format('#' * 30), 100))
+
+# Various AppleScripts we need
 def setupAppleScript():
     global scptExport
     global scptLaunch
@@ -136,6 +167,8 @@ def connectToPhotoDb():
     global photoconn
     global photoc
     global photodb
+    if(photoconn != None):
+        return()
     dbexists = False
     if(os.path.isfile(photodb)):
         dbexists = True
@@ -144,35 +177,43 @@ def connectToPhotoDb():
         photoc = photoconn.cursor()
     except:
         print("Could not connect to photdb %s" % photodb)
-    if(dbexists):
-        return()
-    # If the file did not exist, create the database
-    photoc.execute('''CREATE TABLE photos (id integer primary key autoincrement,
-                                           uuid text,
-                                           filename text,
-                                           shouldexist integer)''')
-    photoc.execute('CREATE INDEX photos_uuid on photos (uuid)')
-    photoconn.commit()
+    if(not dbexists):
+        # If the file did not exist, create the database
+        photoc.execute('''CREATE TABLE photos (id integer primary key autoincrement,
+                                               uuid text,
+                                               filename text,
+                                               shouldexist integer)''')
+        photoc.execute('CREATE INDEX photos_uuid on photos (uuid)')
+        photoconn.commit()
+    try:
+        photoc.execute('select * from settings')
+    except:
+        photoc.execute('''CREATE TABLE settings (id integer primary key autoincrement,
+                                                 version integer,
+                                                 rootpath text,
+                                                 tmppath text,
+                                                 photopath text,
+                                                 filename text)''')
+        photoconn.commit()
+    return()
 
 def checkWhatFilesExists():
     global theFiles
     theNum = 0
     theLen = len(photopath)
-    for root, dirs, files in os.walk(photopath):
+    initStatus("Files", 0)
+    for root, dirs, files in os.walk(photopath, topdown=True):
+        dirs[:] = [d for d in dirs if d not in [".jalbum"]]
         r = root[theLen:]
         if(not r in theFolders):
             theFolders[r] = False
         for f in files:
-            if(not verbose):
-                theNum = theNum + 1
-                sys.stdout.write('\rFiles: %d' % (theNum))
-                sys.stdout.flush()
+            theNum = theNum + 1
+            setStatus(theNum)
             doLog('Found file %s in directory %s' % (f, r))
             thePath = "%s/%s" % (r, f)
             theFiles[thePath] = False
-    if(not verbose):
-        sys.stdout.write(" Done!\n")
-        sys.stdout.flush()
+    closeStatus()
 
 def maybeExport(p,uuid):
     global photoconn
@@ -301,14 +342,11 @@ def checkPhotos():
     photoc.execute('UPDATE photos SET shouldexist = 0')
     photoconn.commit()
     # Loop over all photos, one uuid at a time
-    theLen = len(p)
+    initStatus("Photos", len(p))
     for uuid in p:
         photoc.execute('UPDATE photos SET shouldexist = 1 WHERE uuid = ?', (uuid,))
         #photoconn.commit()
-        if(not verbose):
-            progress = i / theLen
-            sys.stdout.write('\rPhotos: [ %-30s ] %3d%%' % (format('#' * int(progress * 30)), int(progress * 100)))
-            sys.stdout.flush()
+        setStatus(i)
         # Check export status etc
         if(not maybeExport(p,uuid)):
             maybeExport(p.uuid)
@@ -316,18 +354,19 @@ def checkPhotos():
             sys.exit(1)
         i = i + 1
     photoconn.commit()
-    if(not verbose):
-        sys.stdout.write('\rPhotos: [ %-30s ] %d%%\n' % (format('#' * 30), 100))
+    closeStatus()
     # Remove stuff that is not referenced
     # Start by checking photos table
+    doLog("Look at things that is not referenced, remove those things")
     photoc.execute('SELECT filename FROM photos WHERE shouldexist = 0')
-    row = photoc.fetchone()
-    while(row):
+    for row in photoc.fetchall():
         match = "/%s" % row[0]
         theLen = len(match)
+        doLog("Looking for filename %s" % row[0])
         for k in theFiles.keys():
             if(k[-theLen:] == match):
                 # Tag files so that they later will be removed
+                doLog("Tag %s for removal" % k)
                 theFiles[k] = False
     # Remove the info about missing UUIDs
     photoc.execute('DELETE FROM photos WHERE shouldexist = 0')
@@ -376,20 +415,17 @@ def doList(theFile):
     doLog("Have connection with database")
     i = 0
     c.execute("select count(*) from RKFace, RKPerson where RKFace.personID = RKperson.modelID")
-    theNum = c.fetchone()[0]
+    initStatus("Faces", c.fetchone()[0])
     c.execute("select RKPerson.name, RKFace.imageID from RKFace, RKPerson where RKFace.personID = RKperson.modelID")
     for person in c:
         if(not person[1] in pf):
             pf[person[1]] = []
         pf[person[1]].append(person[0])
         doLog("%s %s" % (person[1], person[0]))
-        if(not verbose):
-            progress = i / theNum
-            sys.stdout.write('\rFaces:  [ %-30s ] %3d%%' % (format('#' * int(progress * 30)), int(progress * 100)))
-            sys.stdout.flush()
-            i = i + 1
+        setStatus(i)
+        i = i + 1
     conn.close()
-    sys.stdout.write(' Done!\n')
+    closeStatus()
     doLog("Finished walking through persons")
 
     doLog("Grabbing information about photos")
@@ -398,15 +434,12 @@ def doList(theFile):
     d = conn.cursor()
     e = conn.cursor()
     c.execute("select count(*) from RKVersion, RKMaster where RKVersion.isInTrash = 0 and RKVersion.type = 2 and RKVersion.masterUuid = RKMaster.uuid and RKVersion.filename not like '%.pdf'")
-    theNum = c.fetchone()[0]
+    initStatus("Photos", c.fetchone()[0])
     c.execute("select RKVersion.uuid, RKVersion.modelId, RKVersion.masterUuid, RKVersion.filename, RKVersion.lastmodifieddate, RKVersion.imageDate, RKVersion.mainRating, RKVersion.hasAdjustments, RKVersion.hasKeywords, RKVersion.imageTimeZoneOffsetSeconds, RKMaster.imagePath from RKVersion, RKMaster where RKVersion.isInTrash = 0 and RKVersion.type = 2 and RKVersion.masterUuid = RKMaster.uuid and RKVersion.filename not like '%.pdf'")
     i = 0
     for row in c:
-        if(not verbose):
-            progress = i / theNum
-            sys.stdout.write('\rPhotos: [ %-30s ] %3d%%' % (format('#' * int(progress * 30)), int(progress * 100)))
-            sys.stdout.flush()
-            i = i + 1
+        setStatus(i)
+        i = i + 1
         uuid = row[0]
         p[uuid] = {}
         p[uuid]['modelID'] = row[1]
@@ -454,7 +487,7 @@ def doList(theFile):
 
         doLog("To be stored in album(s) %s" % (p[uuid]['albums']))
     conn.close()
-    sys.stdout.write(' Done!\n')
+    closeStatus()
 
 def query_yes_no(question, default="no"):
     """Ask a yes/no question via raw_input() and return their answer.
@@ -528,6 +561,7 @@ def main():
     global photopath
     global rootpath
     global photodb
+    global theVersion
 
     #rootpath = CWD
     rootpath = os.getcwd()
@@ -539,9 +573,29 @@ def main():
         print(err) # will print something like "option -a not recognized"
         usage()
         sys.exit(2)
+
     filename = ("%s/Pictures/Photos Library.photoslibrary" % os.path.expanduser("~"))
     if(not os.path.exists("%s/database/apdb/Library.apdb" % filename) and not os.path.exists("%s/database/Library.apdb" % filename)):
-        filename = None
+        filename = ("%s/Pictures/Photos_Library.photoslibrary" % os.path.expanduser("~"))
+        if(not os.path.exists("%s/database/apdb/Library.apdb" % filename) and not os.path.exists("%s/database/Library.apdb" % filename)):
+            filename = None
+    
+    if(len(args) > 1):
+        usage()
+        sys.exit(2)
+
+    if(len(args) == 1):
+        photodb = "%s/%s" % (os.getcwd(), args[0])
+        connectToPhotoDb()
+        photoc.execute("SELECT version, rootpath, tmppath, photopath, filename from settings")
+        row = photoc.fetchone()
+        if(row):
+            theVersion = row[0]
+            rootpath = row[1]
+            tmppath = row[2]
+            photopath = row[3]
+            filename = row[4]
+
     # Patch until we know what arguments to use
     doInit = False
     for o, a in opts:
@@ -551,8 +605,14 @@ def main():
             usage()
             sys.exit(0)
         elif o in ("-r", "--root"):
+            if(theVersion):
+                print("Root path already set for this database")
+                sys.exit(2)
             rootpath = a
         elif o in ("-f", "--file"):
+            if(theVersion):
+                print("Filename already set for this database")
+                sys.exit(2)
             filename = a
             if(not os.path.exists("%s/database/apdb/Library.apdb" % filename) and not os.path.exists("%s/database/Library.apdb" % filename)):
                 print("Database %s/database/[apdb/]Library.apdb does not exist" % filename)
@@ -560,20 +620,33 @@ def main():
         elif o in ("-i", "--init"):
             doInit = True
         else:
-            assert False, "Unhandled option"
+            assert False, "Unhandled option"    
 
     if(filename == None):
         print("No filename given")
         sys.exit(1)
 
-    # The path to where photos are to be stored
-    tmppath = "%s/tmp/" % rootpath
-    photopath = "%s/photos/" % rootpath
-    doLog("Using directory %s as root" % rootpath)
+    if(not theVersion):
+        # The path to where photos are to be stored
+        tmppath = "%s/tmp/" % rootpath
+        photopath = "%s/photos/" % rootpath
+        # Sqlite3 database with information about the photos
+        photodb = "%s/photos.sqlite" % rootpath
 
-    # Sqlite3 database with information about the photos
-    photodb = "%s/photos.sqlite" % rootpath
+    doLog("Using directory %s as root" % rootpath)
     doLog("Storing database as %s" % photodb)
+
+    connectToPhotoDb()
+    photoc.execute("SELECT version, rootpath, tmppath, photopath, filename from settings")
+    row = photoc.fetchone()
+    if(not row):
+        doLog("Inserting values in the settings table")
+        doLog("rootpath: %s" % rootpath)
+        doLog("tmppath: %s" % tmppath)
+        doLog("photopath: %s" % photopath)
+        doLog("filename: %s" % filename)
+        photoc.execute('INSERT INTO settings VALUES (NULL, ?, ?, ?, ?, ?)', (1, rootpath, tmppath, photopath, filename))
+        photoconn.commit()
 
     setupAppleScript()
 
